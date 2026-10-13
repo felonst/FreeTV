@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Free TV - International</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b1020; --panel:#151d31; --line:#293550; --accent:#4f8cff; --muted:#aab6cc; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:#f4f7ff; }
+  header { padding:18px 20px; border-bottom:1px solid var(--line); background:#10182a; }
+  h1 { margin:0; font-size:1.35rem; } header p { margin:5px 0 0; color:var(--muted); font-size:.9rem; }
+  main { max-width:1200px; margin:auto; padding:16px; display:grid; grid-template-columns:minmax(0,1.7fr) minmax(280px,1fr); gap:16px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+  .player-wrap { background:#000; aspect-ratio:16/9; display:flex; align-items:center; justify-content:center; }
+  video { display:block; width:100%; max-height:70vh; aspect-ratio:16/9; background:#000; }
+  .now { padding:12px 14px; border-top:1px solid var(--line); }
+  .now strong { display:block; font-size:1.05rem; }
+  .muted { color:var(--muted); font-size:.88rem; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; padding:12px; }
+  input,select,button { font:inherit; color:#f4f7ff; background:#0d1425; border:1px solid #35435f; border-radius:9px; padding:10px 11px; }
+  input { min-width:0; flex:1; }
+  button { cursor:pointer; background:var(--accent); border-color:var(--accent); font-weight:600; }
+  button.secondary { background:#202c44; border-color:#35435f; }
+  button:disabled { opacity:.55; cursor:wait; }
+  .list-head { padding:14px 14px 0; display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  .channel-list { max-height:62vh; overflow:auto; padding:8px; }
+  .channel { width:100%; display:flex; align-items:center; gap:10px; text-align:left; background:transparent; border:1px solid transparent; padding:10px; margin:2px 0; }
+  .channel:hover,.channel.active { background:#202c44; border-color:#405477; }
+  .logo { width:42px; height:32px; object-fit:contain; background:#0b1020; border-radius:5px; flex-shrink:0; }
+  .logo-placeholder { width:42px; height:32px; display:grid; place-items:center; background:#26344f; border-radius:5px; flex-shrink:0; }
+  .chname { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; }
+  .chmeta { display:block; color:var(--muted); font-size:.78rem; margin-top:3px; }
+  #status { padding:0 14px 13px; color:var(--muted); font-size:.86rem; }
+  .notice { margin:0 16px 16px; color:var(--muted); font-size:.83rem; line-height:1.5; }
+  @media(max-width:800px) { main { grid-template-columns:1fr; padding:10px; } .channel-list { max-height:48vh; } header { padding:15px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1> Free TV </h1>
+  <p>Dev by Felonst</p>
+</header>
+<main>
+  <section class="panel">
+    <div class="player-wrap"><video id="video" controls playsinline></video></div>
+    <div class="now"><strong id="currentTitle">Select a channel to start</strong><span class="muted" id="currentMeta">Live stream playback depends on the channel and your location.</span></div>
+    <div class="controls">
+      <button id="reloadBtn" type="button">Reload channels</button>
+      <button id="fullscreenBtn" class="secondary" type="button">Full screen</button>
+      <a id="openStream" href="#" target="_blank" rel="noopener" style="align-self:center;color:#9fc0ff;font-size:.9rem">Open stream link</a>
+    </div>
+    <p class="notice">This app lists publicly indexed streams; it does not host TV channels. Some streams may be offline, geo-blocked, or unavailable in your browser. Only watch content you are allowed to access.</p>
+  </section>
+  <section class="panel">
+    <div class="list-head"><strong>Channels</strong><span id="count" class="muted">Loading…</span></div>
+    <div class="controls">
+      <input id="search" type="search" placeholder="Search channel…" aria-label="Search channels">
+      <select id="region" aria-label="Filter channels">
+        <option value="all">All countries</option>
+        <option value="lk">Sri Lanka</option>
+        <option value="other">International</option>
+      </select>
+    </div>
+    <div id="status" role="status">Loading playlist…</div>
+    <div id="channelList" class="channel-list"></div>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<script>
+(() => {
+  'use strict';
+  const PLAYLIST_URL = 'https://iptv-org.github.io/iptv/index.m3u';
+  const video = document.getElementById('video');
+  const list = document.getElementById('channelList');
+  const search = document.getElementById('search');
+  const region = document.getElementById('region');
+  const status = document.getElementById('status');
+  const count = document.getElementById('count');
+  const currentTitle = document.getElementById('currentTitle');
+  const currentMeta = document.getElementById('currentMeta');
+  const openStream = document.getElementById('openStream');
+  let channels = [];
+  let activeUrl = '';
+  let hls = null;
+
+  function parseAttrs(line) {
+    const attrs = {};
+    const re = /([\w-]+)="([^"]*)"/g;
+    let m;
+    while ((m = re.exec(line)) !== null) attrs[m[1].toLowerCase()] = m[2];
+    return attrs;
+  }
+  function parseM3U(text) {
+    const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
+    const out = [];
+    let meta = null;
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith('#EXTINF:')) {
+        const comma = line.indexOf(',');
+        meta = { attrs: parseAttrs(line), name: comma >= 0 ? line.slice(comma + 1).trim() : 'Unknown channel' };
+      } else if (!line.startsWith('#') && meta) {
+        const attrs = meta.attrs;
+        const name = meta.name || attrs['tvg-name'] || 'Unknown channel';
+        const country = (attrs['tvg-country'] || '').toUpperCase();
+        const group = attrs['group-title'] || '';
+        const logo = attrs['tvg-logo'] || '';
+        out.push({ name, url: line, country, group, logo });
+        meta = null;
+      }
+    }
+    return out;
+  }
+  function safeText(s) { return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function render() {
+    const q = search.value.trim().toLowerCase();
+    const filter = region.value;
+    const filtered = channels.filter(ch => {
+      const isLK = ch.country.split(/[;,]/).some(c => c.trim() === 'LK') || /sri lanka/i.test(ch.group);
+      const matchRegion = filter === 'all' || (filter === 'lk' && isLK) || (filter === 'other' && !isLK);
+      return matchRegion && (!q || (ch.name + ' ' + ch.group + ' ' + ch.country).toLowerCase().includes(q));
+    });
+    count.textContent = `${filtered.length.toLocaleString()} shown / ${channels.length.toLocaleString()}`;
+    list.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    filtered.slice(0, 2500).forEach(ch => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'channel' + (ch.url === activeUrl ? ' active' : '');
+      const logo = document.createElement('img');
+      logo.className = 'logo';
+      logo.alt = '';
+      logo.loading = 'lazy';
+      logo.src = ch.logo || '';
+      logo.onerror = () => { const p = document.createElement('span'); p.className='logo-placeholder'; p.textContent='TV'; logo.replaceWith(p); };
+      const info = document.createElement('span');
+      info.style.minWidth = '0';
+      info.innerHTML = `<span class="chname">${safeText(ch.name)}</span><span class="chmeta">${safeText(ch.country || 'Country not listed')}${ch.group ? ' · ' + safeText(ch.group) : ''}</span>`;
+      btn.append(logo, info);
+      btn.addEventListener('click', () => play(ch));
+      frag.appendChild(btn);
+    });
+    list.appendChild(frag);
+    if (filtered.length > 2500) status.textContent = 'Showing first 2,500 matches. Search to narrow the list.';
+    else status.textContent = filtered.length ? 'Choose a channel from the list.' : 'No channels match this search.';
+  }
+  function play(ch) {
+    activeUrl = ch.url;
+    currentTitle.textContent = ch.name;
+    currentMeta.textContent = `${ch.country || 'Country not listed'}${ch.group ? ' · ' + ch.group : ''}`;
+    openStream.href = ch.url;
+    openStream.style.pointerEvents = 'auto';
+    if (hls) { hls.destroy(); hls = null; }
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    if (window.Hls && Hls.isSupported() && /\.m3u8($|[?#])/i.test(ch.url)) {
+      hls = new Hls();
+      hls.loadSource(ch.url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data.fatal) {
+          currentMeta.textContent = 'Playback failed. The stream may be offline, blocked, or unsupported. Try another channel or open the stream link.';
+          hls.destroy(); hls = null;
+        }
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+    } else {
+      video.src = ch.url;
+      video.play().catch(() => {
+        currentMeta.textContent = 'Tap Play if needed. If playback fails, this stream may be unsupported or unavailable in your region.';
+      });
+    }
+    render();
+  }
+  async function loadPlaylist() {
+    const btn = document.getElementById('reloadBtn');
+    btn.disabled = true;
+    status.textContent = 'Downloading playlist…';
+    try {
+      const response = await fetch(PLAYLIST_URL, { cache: 'no-store' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const text = await response.text();
+      channels = parseM3U(text);
+      if (!channels.length) throw new Error('No channels found in playlist.');
+      render();
+      status.textContent = 'Playlist loaded. Choose a channel.';
+    } catch (err) {
+      status.textContent = 'Could not load the playlist. Check your internet connection. If you opened this file directly, run it through a local web server or host it online. (' + err.message + ')';
+      count.textContent = 'Load failed';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  search.addEventListener('input', render);
+  region.addEventListener('change', render);
+  document.getElementById('reloadBtn').addEventListener('click', loadPlaylist);
+  document.getElementById('fullscreenBtn').addEventListener('click', async () => {
+    try {
+      if (video.requestFullscreen) await video.requestFullscreen();
+      else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+    } catch (_) {}
+  });
+  video.addEventListener('error', () => {
+    if (activeUrl) currentMeta.textContent = 'Unable to play this stream. It may be offline, geo-blocked, or use a format this browser does not support.';
+  });
+  openStream.addEventListener('click', e => { if (!activeUrl) e.preventDefault(); });
+  loadPlaylist();
+})();
+</script>
+</body>
+</html>
